@@ -1,12 +1,12 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException, Query
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from typing import List, Optional
 import uuid
 from datetime import datetime, timezone
 
@@ -26,45 +26,117 @@ app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# ===== MODELS =====
+class Service(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    slug: str
+    title: str
+    shortDescription: str
+    fullDescription: str
+    features: List[str]
+    basePriceInINR: int
+    duration: str
+    category: str
+    icon: str
+    faqs: List[dict]
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
 
-# Add your routes to the router instead of directly to app
+class BlogPost(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    slug: str
+    title: str
+    excerpt: str
+    contentHTML: str
+    category: str
+    tags: List[str]
+    authorName: str
+    publishedAt: str
+    readTime: str
+
+
+class ContactCreate(BaseModel):
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    subject: str
+    message: str
+
+
+class Contact(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    name: str
+    email: str
+    phone: Optional[str] = None
+    subject: str
+    message: str
+    status: str = "new"
+    createdAt: str
+
+
+# ===== ROUTES =====
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "Veteran Nexus API"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
+@api_router.get("/services", response_model=List[Service])
+async def get_services():
+    services = await db.services.find({}, {"_id": 0}).to_list(100)
+    return services
+
+
+@api_router.get("/services/{slug}", response_model=Service)
+async def get_service_by_slug(slug: str):
+    service = await db.services.find_one({"slug": slug}, {"_id": 0})
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    return service
+
+
+@api_router.get("/blog", response_model=List[BlogPost])
+async def get_blog_posts(
+    category: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    limit: int = Query(20, le=100)
+):
+    query = {}
+    if category:
+        query["category"] = category
+    if q:
+        query["$or"] = [
+            {"title": {"$regex": q, "$options": "i"}},
+            {"excerpt": {"$regex": q, "$options": "i"}}
+        ]
     
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
+    posts = await db.blog_posts.find(query, {"_id": 0}).to_list(limit)
+    return posts
+
+
+@api_router.get("/blog/{slug}", response_model=BlogPost)
+async def get_blog_post(slug: str):
+    post = await db.blog_posts.find_one({"slug": slug}, {"_id": 0})
+    if not post:
+        raise HTTPException(status_code=404, detail="Blog post not found")
+    return post
+
+
+@api_router.post("/contact", response_model=Contact)
+async def create_contact(contact_data: ContactCreate):
+    contact_dict = contact_data.model_dump()
+    contact_obj = Contact(
+        id=str(uuid.uuid4()),
+        **contact_dict,
+        createdAt=datetime.now(timezone.utc).isoformat()
+    )
     
-    return status_checks
+    doc = contact_obj.model_dump()
+    await db.contacts.insert_one(doc)
+    
+    return contact_obj
+
 
 # Include the router in the main app
 app.include_router(api_router)
